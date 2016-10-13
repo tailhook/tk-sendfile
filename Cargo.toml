@@ -1,0 +1,26 @@
+[package]
+name = "tk-sendfile"
+description = """
+    A wrapper around sendfile for tokio that executes all the disk operations
+    in thread pool, retries automatically. In future we also want to provide
+    a fallback for systems which don't have a sendfile syscall.
+"""
+license = "MIT/Apache-2.0"
+readme = "README.rst"
+keywords = ["tokio", "disk", "pool", "sendfile"]
+homepage = "http://github.com/tailhook/tk-sendfile"
+documentation = "http://docs.rs/tk-sendfile"
+version = "0.1.0"
+authors = ["paul@colomiets.name"]
+
+[dependencies]
+futures = "0.1.1"
+tokio-core = "0.1.0"
+quick-error = "1.1.0"
+
+[dev-dependencies]
+argparse = "0.2.1"
+env_logger = "0.3.5"
+
+[lib]
+name = "tk_sendfile"

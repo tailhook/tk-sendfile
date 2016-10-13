@@ -13,7 +13,9 @@ Challenges:
    disk access for two cases: initial ``open()`` and for reading file inside
    the ``sendfile()`` system call itself
 2. Doing more than single ``sendfile`` operation requires some bookkeeping
-3. [TODO] Serving user-specified file paths requires non-trivial code to
+3. It should be possible to implement file cache (both opened files and
+   in-memory file data) transparently for the user
+4. [TODO] Serving user-specified file paths requires non-trivial code to
    prevent symlink attacks
 
 

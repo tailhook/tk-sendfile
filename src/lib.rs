@@ -16,7 +16,8 @@ use std::path::PathBuf;
 use std::os::unix::io::AsRawFd;
 
 use libc::sendfile;
-use futures_cpupool::CpuPool;
+use futures::Future;
+use futures_cpupool::{CpuPool, CpuFuture};
 
 /// A reference to a thread pool for disk operations
 #[derive(Clone)]
@@ -82,10 +83,22 @@ pub trait Destination: Send {
 pub struct Sendfile {
     file: Box<FileOpener>,
     offset: u64,
+    size: u64,
 }
 
 /// Future that is returned from `DiskPool::send`
 type SendfileFuture<D> = futures_cpupool::CpuFuture<D, io::Error>;
+
+pub struct WriteInto {
+    sendfile: Sendfile,
+    
+}
+/*
+pub enum Mem {
+    Mem(Box<AsRef<u8>>),
+    File(Sendfile),
+}
+*/
 
 struct Inner {
     pool: CpuPool,
@@ -117,18 +130,28 @@ impl DiskPool {
         }))
     }
     /// Start a file send operation
+    pub fn open<F>(&self, file: F)
+        -> CpuFuture<Sendfile, io::Error>
+        where F: IntoFileOpener + Send + Sized + 'static,
+    {
+        let mut file = Box::new(file.into_file_opener());
+        self.0.pool.spawn_fn(move || {
+            let (_, size) = try!(file.open());
+            let file = Sendfile {
+                file: file,
+                offset: 0,
+                size: size,
+            };
+            Ok(file)
+        })
+    }
+    /// A shortcut method to send whole file
     pub fn send<F, D>(&self, file: F, destination: D)
-        -> SendfileFuture<D>
+        -> futures::BoxFuture<D, io::Error>
         where F: IntoFileOpener + Send + Sized + 'static,
               D: Destination + Send + Sized + 'static,
     {
-        let file = Sendfile {
-            file: Box::new(file.into_file_opener()),
-            offset: 0,
-        };
-        self.0.pool.spawn_fn(move || {
-            read_file(file, destination)
-        })
+        self.open(file).then(|file| file.write_into(destination)).boxed()
     }
 }
 

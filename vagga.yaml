@@ -19,7 +19,7 @@ containers:
 
   ubuntu:
     setup:
-    - !Ubuntu trusty
+    - !Ubuntu xenial
     - !UbuntuUniverse
     - !Install [ca-certificates, git, build-essential]
 

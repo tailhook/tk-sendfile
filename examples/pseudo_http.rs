@@ -10,7 +10,7 @@ use argparse::{ArgumentParser, Parse};
 use futures::Future;
 use futures::stream::Stream;
 use tokio_core::net::TcpListener;
-use tokio_core::io::write_all;
+use tokio_core::io::{write_all, read_to_end};
 use tokio_core::reactor::Core;
 use tk_sendfile::DiskPool;
 
@@ -39,15 +39,21 @@ fn main() {
     let done = socket.incoming().for_each(|(socket, _addr)| {
         handle.spawn(
             disk_pool.open(filename.clone())
-            .then(|file| {
+            .and_then(|file| {
                 let header = format!("HTTP/1.0 200 OK\r\n\
                     Content-Length: {}\r\n\
+                    Connection: close\r\n\
                     \r\n", file.size());
                 write_all(socket, header)
                 .and_then(|(socket, _)| file.write_into(socket))
+                // Wait until client closes connection
+                // This is needed to ensure that peer has received data
+                // (otherwise close() looses some data)
+                .and_then(|socket| read_to_end(socket, Vec::new()))
             })
             .then(|result| {
-                println!("Result {:?}", result);
+                println!("Done {:?}",
+                    result.map(|(_, b)| format!("{} bytes read", b.len())));
                 Ok(())
             })
         );

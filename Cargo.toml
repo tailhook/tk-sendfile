@@ -18,7 +18,7 @@ futures = "0.1.2"
 futures-cpupool = "0.1.2"
 tokio-core = "0.1.0"
 quick-error = "1.1.0"
-libc = "0.2.16"
+nix = "0.7.0"
 
 [dev-dependencies]
 argparse = "0.2.1"

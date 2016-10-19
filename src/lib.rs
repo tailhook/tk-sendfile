@@ -2,6 +2,24 @@
 //! with zero copy (using sendfile).
 //!
 //! Use `DiskPool` structure to request file operations.
+//!
+//! # Example
+//!
+//! ```rust,ignore
+//!     let pool = DiskPool::new(CpuPool::new(40));
+//!     pool.send("file", socket)
+//! ```
+//!
+//! # Settings
+//!
+//! It's recommended to make large number of threads in the pool
+//! for three reasons:
+//!
+//! 1. To make use of device parallelism
+//! 2. To allow kernel to merge some disk operations
+//! 3. To fix head of line blocking when some request reach disk but others
+//!    could be served immediately from cache (we don't know which ones are
+//!    cached, so we run all of them in a pool)
 #![warn(missing_docs)]
 
 extern crate nix;
@@ -12,7 +30,6 @@ extern crate futures_cpupool;
 use std::io;
 use std::mem;
 use std::fs::File;
-use std::sync::Arc;
 use std::path::PathBuf;
 use std::os::unix::io::AsRawFd;
 
@@ -22,7 +39,9 @@ use nix::sys::sendfile::sendfile;
 
 /// A reference to a thread pool for disk operations
 #[derive(Clone)]
-pub struct DiskPool(Arc<Inner>);
+pub struct DiskPool {
+    pool: CpuPool,
+}
 
 /// This trait represents anything that can open the file
 ///
@@ -110,10 +129,6 @@ enum WriteState<F: FileOpener, D: Destination> {
     Empty,
 }
 
-struct Inner {
-    pool: CpuPool,
-}
-
 impl<T: Into<PathBuf> + Send> IntoFileOpener for T {
     type Opener = PathOpener;
     fn into_file_opener(self) -> PathOpener {
@@ -133,11 +148,11 @@ impl FileOpener for PathOpener {
 }
 
 impl DiskPool {
-    /// Create a disk pool with default configuration
-    pub fn new() -> DiskPool {
-        DiskPool(Arc::new(Inner {
-            pool: CpuPool::new(20),
-        }))
+    /// Create a disk pool that sends its tasks into the CpuPool
+    pub fn new(pool: CpuPool) -> DiskPool {
+        DiskPool {
+            pool: pool,
+        }
     }
     /// Start a file send operation
     pub fn open<F>(&self, file: F)
@@ -165,7 +180,7 @@ impl DiskPool {
                 size: size,
             }).boxed()
         } else {
-            self.0.pool.spawn_fn(move || {
+            self.pool.spawn_fn(move || {
                 let (_, size) = try!(file.open());
                 let file = Sendfile {
                     file: file,
@@ -313,7 +328,7 @@ impl<F: FileOpener, D: Destination> Future for WriteFile<F, D>
                 WaitWrite(mut file, mut dest) => {
                     match dest.poll_write() {
                         Async::Ready(()) => {
-                            WaitSend((self.0).0.pool.spawn_fn(move || {
+                            WaitSend(self.0.pool.spawn_fn(move || {
                                 match dest.write_file(&mut file) {
                                     Ok(0) => {
                                         Err(io::Error::new(

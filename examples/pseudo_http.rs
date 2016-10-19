@@ -1,4 +1,5 @@
 extern crate futures;
+extern crate futures_cpupool;
 extern crate argparse;
 extern crate tokio_core;
 extern crate tk_sendfile;
@@ -9,6 +10,7 @@ use std::path::PathBuf;
 use argparse::{ArgumentParser, Parse};
 use futures::Future;
 use futures::stream::Stream;
+use futures_cpupool::CpuPool;
 use tokio_core::net::TcpListener;
 use tokio_core::io::{write_all, read_to_end};
 use tokio_core::reactor::Core;
@@ -29,7 +31,15 @@ fn main() {
             "File to serve");
         ap.parse_args_or_exit();
     }
-    let disk_pool = DiskPool::new();
+    // While it's not interesting in demo, it's recommented to have fairly
+    // large number of threads here for three reasons:
+    //
+    // 1. To make use of device parallelism
+    // 2. To allow kernel to merge some disk operations
+    // 3. To fix head of line blocking when some request reach disk but others
+    //    could be served immediately from cache (we don't know which are
+    //    cached)
+    let disk_pool = DiskPool::new(CpuPool::new(40));
 
     let mut lp = Core::new().unwrap();
     let handle = lp.handle();

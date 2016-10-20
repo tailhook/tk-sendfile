@@ -103,6 +103,17 @@ pub trait Destination: io::Write + Send {
         -> Result<usize, io::Error>;
 
     /// Test to see if this object may be writable
+    ///
+    /// Note that in default implementation (for AsRawFd + Write) we use
+    /// `poll()` syscall here explicitly. This may seem wasteful, but it's
+    /// not for the folowing reasons:
+    ///
+    /// * It's very cheap syscall as cheap as possible
+    /// * For tokio-core its normal that spurious wake ups happen
+    /// * On a spurious wakeup we transfer socket to disk thread, thread does
+    ///   useless `sendfile()` call, then transfers socket to the IO thread
+    ///   back and wakes up IO thread. I.e. at least two syscalls of at least
+    ///   as expensive as `poll()` syscall here.
     fn poll_write(&mut self) -> Async<()>;
 }
 
@@ -203,7 +214,7 @@ impl DiskPool {
     }
 }
 
-impl Destination for tokio_core::net::TcpStream {
+impl<T: AsRawFd + io::Write + Send> Destination for T {
     fn write_file<O: FileOpener>(&mut self, file: &mut Sendfile<O>)
         -> Result<usize, io::Error>
     {

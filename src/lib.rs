@@ -150,8 +150,8 @@ impl<T: Into<PathBuf> + Send> IntoFileOpener for T {
 impl FileOpener for PathOpener {
     fn open(&mut self) -> Result<(&AsRawFd, u64), io::Error> {
         if self.1.is_none() {
-            let file = try!(File::open(&self.0));
-            let meta = try!(file.metadata());
+            let file = File::open(&self.0)?;
+            let meta = file.metadata()?;
             self.1 = Some((file, meta.len()));
         }
         Ok(self.1.as_ref().map(|&(ref f, s)| (f as &AsRawFd, s)).unwrap())
@@ -192,7 +192,7 @@ impl DiskPool {
             }).boxed()
         } else {
             self.pool.spawn_fn(move || {
-                let (_, size) = try!(file.open());
+                let (_, size) = file.open()?;
                 let file = Sendfile {
                     file: file,
                     pool: pool,
@@ -218,7 +218,7 @@ impl<T: AsRawFd + io::Write + Send> Destination for T {
     fn write_file<O: FileOpener>(&mut self, file: &mut Sendfile<O>)
         -> Result<usize, io::Error>
     {
-        let (file_ref, size) = try!(file.file.open());
+        let (file_ref, size) = file.file.open()?;
         let mut offset = file.offset as i64;
         let result = sendfile(self.as_raw_fd(), file_ref.as_raw_fd(),
                          Some(&mut offset),

@@ -152,6 +152,10 @@ impl FileOpener for PathOpener {
         if self.1.is_none() {
             let file = File::open(&self.0)?;
             let meta = file.metadata()?;
+            if !meta.file_type().is_file() {
+                return Err(io::Error::new(io::ErrorKind::Other,
+                    "Not a regular file"));
+            }
             self.1 = Some((file, meta.len()));
         }
         Ok(self.1.as_ref().map(|&(ref f, s)| (f as &AsRawFd, s)).unwrap())

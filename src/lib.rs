@@ -268,6 +268,14 @@ impl<O: FileOpener> Sendfile<O> {
             WriteFile(self.pool.clone(), WriteState::WaitWrite(self, dest))
         }
     }
+    /// Get inner file opener
+    pub fn get_inner(&self) -> &O {
+        return &self.file;
+    }
+    /// Get mutlable reference to inner file opener
+    pub fn get_mut(&mut self) -> &mut O {
+        return &mut self.file;
+    }
 }
 
 impl<F: FileOpener, D: Destination> Future for WriteFile<F, D>

@@ -10,7 +10,7 @@ readme = "README.rst"
 keywords = ["tokio", "disk", "pool", "sendfile"]
 homepage = "http://github.com/tailhook/tk-sendfile"
 documentation = "http://docs.rs/tk-sendfile"
-version = "0.3.1"
+version = "0.3.2"
 authors = ["paul@colomiets.name"]
 
 [dependencies]

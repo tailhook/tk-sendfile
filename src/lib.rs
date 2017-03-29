@@ -33,6 +33,9 @@ use std::cmp::min;
 use std::fs::File;
 use std::path::PathBuf;
 
+#[cfg(windows)]
+use std::sync::Mutex;
+
 use futures::{Future, Poll, Async, BoxFuture, finished, failed};
 use futures_cpupool::{CpuPool, CpuFuture};
 use tokio_io::AsyncWrite;
@@ -76,6 +79,9 @@ pub trait FileOpener: Send + 'static {
 /// For unix we implement it for `File + AsRawFd` with `pread()` system call.
 /// For windows we're implementing it for `Mutex<File>` and use seek.
 pub trait FileReader {
+    /// Read file at specified location
+    ///
+    /// This corresponds to the `pread` system call on most unix systems
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
 }
 
@@ -96,7 +102,13 @@ pub trait IntoFileOpener: Send {
 
 /// File opener implementation that opens specified file path directly
 #[derive(Debug)]
+#[cfg(unix)]
 pub struct PathOpener(PathBuf, Option<(File, u64)>);
+
+/// File opener implementation that opens specified file path directly
+#[derive(Debug)]
+#[cfg(windows)]
+pub struct PathOpener(PathBuf, Option<(Mutex<File>, u64)>);
 
 /// A trait that represents anything that file can be sent to
 ///
@@ -142,6 +154,7 @@ impl<T: Into<PathBuf> + Send> IntoFileOpener for T {
     }
 }
 
+#[cfg(unix)]
 impl FileOpener for PathOpener {
     fn open(&mut self) -> Result<(&FileReader, u64), io::Error> {
         if self.1.is_none() {
@@ -152,6 +165,22 @@ impl FileOpener for PathOpener {
                     "Not a regular file"));
             }
             self.1 = Some((file, meta.len()));
+        }
+        Ok(self.1.as_ref().map(|&(ref f, s)| (f as &FileReader, s)).unwrap())
+    }
+}
+
+#[cfg(windows)]
+impl FileOpener for PathOpener {
+    fn open(&mut self) -> Result<(&FileReader, u64), io::Error> {
+        if self.1.is_none() {
+            let file = File::open(&self.0)?;
+            let meta = file.metadata()?;
+            if !meta.file_type().is_file() {
+                return Err(io::Error::new(io::ErrorKind::Other,
+                    "Not a regular file"));
+            }
+            self.1 = Some((Mutex::new(file), meta.len()));
         }
         Ok(self.1.as_ref().map(|&(ref f, s)| (f as &FileReader, s)).unwrap())
     }
@@ -369,5 +398,14 @@ impl FileReader for File {
         } else {
             Ok(rc as usize)
         }
+    }
+}
+
+#[cfg(windows)]
+impl FileReader for Mutex<File> {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        let real_file = self.lock().expect("mutex is not poisoned");
+        real_file.seek(io::SeekFrom::SeekStart(offset))?;
+        real_file.read(buf)
     }
 }

@@ -404,6 +404,8 @@ impl FileReader for File {
 #[cfg(windows)]
 impl FileReader for Mutex<File> {
     fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        use std::io::{Read, Seek};
+
         let real_file = self.lock().expect("mutex is not poisoned");
         real_file.seek(io::SeekFrom::SeekStart(offset))?;
         real_file.read(buf)

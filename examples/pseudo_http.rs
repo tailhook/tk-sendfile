@@ -2,6 +2,7 @@ extern crate futures;
 extern crate futures_cpupool;
 extern crate argparse;
 extern crate tokio_core;
+extern crate tokio_io;
 extern crate tk_sendfile;
 
 use std::net::SocketAddr;
@@ -12,7 +13,7 @@ use futures::Future;
 use futures::stream::Stream;
 use futures_cpupool::CpuPool;
 use tokio_core::net::TcpListener;
-use tokio_core::io::{write_all, read_to_end};
+use tokio_io::io::{write_all, read_to_end};
 use tokio_core::reactor::Core;
 use tk_sendfile::DiskPool;
 

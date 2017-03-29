@@ -22,20 +22,20 @@
 //!    cached, so we run all of them in a pool)
 #![warn(missing_docs)]
 
-extern crate nix;
+extern crate libc;
 extern crate futures;
-extern crate tokio_core;
+extern crate tokio_io;
 extern crate futures_cpupool;
 
 use std::io;
 use std::mem;
+use std::cmp::min;
 use std::fs::File;
 use std::path::PathBuf;
-use std::os::unix::io::AsRawFd;
 
 use futures::{Future, Poll, Async, BoxFuture, finished, failed};
 use futures_cpupool::{CpuPool, CpuFuture};
-use nix::sys::sendfile::sendfile;
+use tokio_io::AsyncWrite;
 
 /// A reference to a thread pool for disk operations
 #[derive(Clone)]
@@ -67,7 +67,16 @@ pub trait FileOpener: Send + 'static {
     /// Open the file
     ///
     /// This function is called in disk thread
-    fn open(&mut self) -> Result<(&AsRawFd, u64), io::Error>;
+    fn open(&mut self) -> Result<(&FileReader, u64), io::Error>;
+}
+
+
+/// This trait represents file that can atomically be read at specific point
+///
+/// For unix we implement it for `File + AsRawFd` with `pread()` system call.
+/// For windows we're implementing it for `Mutex<File>` and use seek.
+pub trait FileReader {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize>;
 }
 
 /// Trait that represents something that can be converted into a file
@@ -94,27 +103,13 @@ pub struct PathOpener(PathBuf, Option<(File, u64)>);
 /// The trait is implemented for TcpStream right away but you might want
 /// to implement your own thing, for example to prepend the data with file
 /// length header
-pub trait Destination: io::Write + Send {
+pub trait Destination: AsyncWrite + Send {
 
     /// This method does the actual sendfile call
     ///
     /// Note: this method is called in other thread
     fn write_file<O: FileOpener>(&mut self, file: &mut Sendfile<O>)
         -> Result<usize, io::Error>;
-
-    /// Test to see if this object may be writable
-    ///
-    /// Note that in default implementation (for AsRawFd + Write) we use
-    /// `poll()` syscall here explicitly. This may seem wasteful, but it's
-    /// not for the folowing reasons:
-    ///
-    /// * It's very cheap syscall as cheap as possible
-    /// * For tokio-core its normal that spurious wake ups happen
-    /// * On a spurious wakeup we transfer socket to disk thread, thread does
-    ///   useless `sendfile()` call, then transfers socket to the IO thread
-    ///   back and wakes up IO thread. I.e. at least two syscalls of at least
-    ///   as expensive as `poll()` syscall here.
-    fn poll_write(&mut self) -> Async<()>;
 }
 
 /// A structure that tracks progress of sending a file
@@ -148,7 +143,7 @@ impl<T: Into<PathBuf> + Send> IntoFileOpener for T {
 }
 
 impl FileOpener for PathOpener {
-    fn open(&mut self) -> Result<(&AsRawFd, u64), io::Error> {
+    fn open(&mut self) -> Result<(&FileReader, u64), io::Error> {
         if self.1.is_none() {
             let file = File::open(&self.0)?;
             let meta = file.metadata()?;
@@ -158,7 +153,7 @@ impl FileOpener for PathOpener {
             }
             self.1 = Some((file, meta.len()));
         }
-        Ok(self.1.as_ref().map(|&(ref f, s)| (f as &AsRawFd, s)).unwrap())
+        Ok(self.1.as_ref().map(|&(ref f, s)| (f as &FileReader, s)).unwrap())
     }
 }
 
@@ -218,35 +213,20 @@ impl DiskPool {
     }
 }
 
-impl<T: AsRawFd + io::Write + Send> Destination for T {
+impl<T: AsyncWrite + Send> Destination for T {
+    #[cfg(unix)]
     fn write_file<O: FileOpener>(&mut self, file: &mut Sendfile<O>)
         -> Result<usize, io::Error>
     {
         let (file_ref, size) = file.file.open()?;
-        let mut offset = file.offset as i64;
-        let result = sendfile(self.as_raw_fd(), file_ref.as_raw_fd(),
-                         Some(&mut offset),
-                         size.saturating_sub(file.offset) as usize);
-        match result {
-            Ok(x) => Ok(x),
-            Err(nix::Error::Sys(x)) => {
-                Err(io::Error::from_raw_os_error(x as i32))
-            }
-            Err(nix::Error::InvalidPath) => unreachable!(),
+        let mut buf = [0u8; 8192];
+        let nbytes = file_ref.read_at(file.offset,
+              &mut buf[..min(size.saturating_sub(file.offset), 8192) as usize],
+              )?;
+        if nbytes == 0 {
+            return Err(io::ErrorKind::UnexpectedEof.into())
         }
-    }
-    fn poll_write(&mut self) -> Async<()> {
-        use nix::poll::{poll, PollFd, EventFlags, POLLOUT };
-
-        let mut fd = [PollFd::new(self.as_raw_fd(), POLLOUT,
-                                  EventFlags::empty())];
-        if let Ok(1) = poll(&mut fd, 0) {
-            return Async::Ready(());
-        } else {
-            return Async::NotReady;
-        }
-        // This doesn't work well, it returns Ready every time
-        // tokio_core::net::TcpStream::poll_write(self)
+        self.write(&buf[..nbytes])
     }
 }
 
@@ -349,34 +329,46 @@ impl<F: FileOpener, D: Destination> Future for WriteFile<F, D>
                     }
                 }
                 WaitWrite(mut file, mut dest) => {
-                    match dest.poll_write() {
-                        Async::Ready(()) => {
-                            WaitSend(self.0.pool.spawn_fn(move || {
-                                match dest.write_file(&mut file) {
-                                    Ok(0) => {
-                                        Err(io::Error::new(
-                                            io::ErrorKind::WriteZero,
-                                            "connection closed while \
-                                             sending a file"))
-                                    }
-                                    Ok(bytes_sent) => {
-                                        file.offset += bytes_sent as u64;
-                                        Ok((file, dest))
-                                    }
-                                    Err(ref e)
-                                    if e.kind() == io::ErrorKind::WouldBlock
-                                    => {
-                                        Ok((file, dest))
-                                    }
-                                    Err(e) => Err(e),
-                                }
-                            }))
+                    WaitSend(self.0.pool.spawn_fn(move || {
+                        match dest.write_file(&mut file) {
+                            Ok(0) => {
+                                Err(io::Error::new(
+                                    io::ErrorKind::WriteZero,
+                                    "connection closed while \
+                                     sending a file"))
+                            }
+                            Ok(bytes_sent) => {
+                                file.offset += bytes_sent as u64;
+                                Ok((file, dest))
+                            }
+                            Err(ref e)
+                            if e.kind() == io::ErrorKind::WouldBlock
+                            => {
+                                Ok((file, dest))
+                            }
+                            Err(e) => Err(e),
                         }
-                        Async::NotReady => WaitWrite(file, dest),
-                    }
+                    }))
                 }
                 Empty => unreachable!(),
             }
+        }
+    }
+}
+
+#[cfg(unix)]
+impl FileReader for File {
+    fn read_at(&self, offset: u64, buf: &mut [u8]) -> io::Result<usize> {
+        use libc::{pread, c_void};
+        use std::os::unix::io::AsRawFd;
+
+        let rc = unsafe { pread(self.as_raw_fd(),
+            buf.as_ptr() as *mut c_void,
+            buf.len(), offset as i64) };
+        if rc < 0 {
+            Err(io::Error::last_os_error())
+        } else {
+            Ok(rc as usize)
         }
     }
 }

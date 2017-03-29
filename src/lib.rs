@@ -407,7 +407,7 @@ impl FileReader for Mutex<File> {
         use std::io::{Read, Seek};
 
         let real_file = self.lock().expect("mutex is not poisoned");
-        real_file.seek(io::SeekFrom::SeekStart(offset))?;
+        real_file.seek(io::SeekFrom::Start(offset))?;
         real_file.read(buf)
     }
 }

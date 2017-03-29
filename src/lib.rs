@@ -214,7 +214,6 @@ impl DiskPool {
 }
 
 impl<T: AsyncWrite + Send> Destination for T {
-    #[cfg(unix)]
     fn write_file<O: FileOpener>(&mut self, file: &mut Sendfile<O>)
         -> Result<usize, io::Error>
     {

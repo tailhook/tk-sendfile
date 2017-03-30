@@ -141,8 +141,9 @@ pub struct Sendfile<O: FileOpener + Send + 'static> {
     size: u64,
 }
 
-/// Future that is returned from `DiskPool::send`
-type SendfileFuture<D> = futures_cpupool::CpuFuture<D, io::Error>;
+// Todo return non-boxed future
+// /// Future that is returned from `DiskPool::send`
+// type SendfileFuture<D> = futures_cpupool::CpuFuture<D, io::Error>;
 
 /// Future returned by `Sendfile::write_into()`
 pub struct WriteFile<F: FileOpener, D: Destination>(DiskPool, WriteState<F, D>)

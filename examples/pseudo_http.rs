@@ -62,9 +62,9 @@ fn main() {
                 // (otherwise close() looses some data)
                 .and_then(|socket| read_to_end(socket, Vec::new()))
             })
-            .then(|result| {
+            .then(|_result| {
                 //println!("Done {:?}",
-                //    result.map(|(_, b)| format!("{} bytes read", b.len())));
+                //    _result.map(|(_, b)| format!("{} bytes read", b.len())));
                 Ok(())
             })
         );

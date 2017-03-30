@@ -25,6 +25,7 @@
 extern crate libc;
 extern crate futures;
 extern crate tokio_io;
+extern crate tokio_core;
 extern crate futures_cpupool;
 
 use std::io;
@@ -39,6 +40,7 @@ use std::sync::Mutex;
 use futures::{Future, Poll, Async, BoxFuture, finished, failed};
 use futures_cpupool::{CpuPool, CpuFuture};
 use tokio_io::AsyncWrite;
+use tokio_core::net::TcpStream;
 
 /// A reference to a thread pool for disk operations
 #[derive(Clone)]
@@ -122,6 +124,12 @@ pub trait Destination: AsyncWrite + Send {
     /// Note: this method is called in other thread
     fn write_file<O: FileOpener>(&mut self, file: &mut Sendfile<O>)
         -> Result<usize, io::Error>;
+
+    /// Test whether this socket is ready to be written to or not.
+    ///
+    /// If socket isn't writable current taks must be scheduled to get a
+    /// notification when socket does become writable.
+    fn poll_write(&self) -> Async<()>;
 }
 
 /// A structure that tracks progress of sending a file
@@ -242,19 +250,21 @@ impl DiskPool {
     }
 }
 
-impl<T: AsyncWrite + Send> Destination for T {
+impl Destination for TcpStream {
     fn write_file<O: FileOpener>(&mut self, file: &mut Sendfile<O>)
         -> Result<usize, io::Error>
     {
         let (file_ref, size) = file.file.open()?;
-        let mut buf = [0u8; 8192];
-        let nbytes = file_ref.read_at(file.offset,
-              &mut buf[..min(size.saturating_sub(file.offset), 8192) as usize],
-              )?;
+        let mut buf = [0u8; 65536];
+        let max_bytes = min(size.saturating_sub(file.offset), 65536) as usize;
+        let nbytes = file_ref.read_at(file.offset, &mut buf[..max_bytes])?;
         if nbytes == 0 {
             return Err(io::ErrorKind::UnexpectedEof.into())
         }
-        self.write(&buf[..nbytes])
+        io::Write::write(self, &buf[..nbytes])
+    }
+    fn poll_write(&self) -> Async<()> {
+        <TcpStream>::poll_write(self)
     }
 }
 
@@ -294,7 +304,7 @@ impl<F: FileOpener, D: Destination> Future for WriteFile<F, D>
     fn poll(&mut self) -> Poll<D, io::Error> {
         use self::WriteState::*;
         loop {
-            self.1 = match mem::replace(&mut self.1, Empty) {
+            let (newstate, cont) = match mem::replace(&mut self.1, Empty) {
                 Mem(mut file, mut dest) => {
                     let need_switch = match file.file.from_cache() {
                         Some(Ok(slice)) => {
@@ -338,47 +348,64 @@ impl<F: FileOpener, D: Destination> Future for WriteFile<F, D>
                         }
                     };
                     if need_switch {
-                        WaitWrite(file, dest)
+                        (WaitWrite(file, dest), true)
                     } else {
-                        Mem(file, dest)
+                        (Mem(file, dest), false)
                     }
                 }
                 WaitSend(mut future) => {
                     match future.poll() {
                         Ok(Async::Ready((file, dest))) => {
-                            if file.size == file.offset {
+                            if file.size <= file.offset {
                                 return Ok(Async::Ready(dest));
                             } else {
-                                WaitWrite(file, dest)
+                                (WaitWrite(file, dest), true)
                             }
                         }
-                        Ok(Async::NotReady) => WaitSend(future),
+                        Ok(Async::NotReady) => (WaitSend(future), false),
                         Err(e) => return Err(e),
                     }
                 }
                 WaitWrite(mut file, mut dest) => {
-                    WaitSend(self.0.pool.spawn_fn(move || {
-                        match dest.write_file(&mut file) {
-                            Ok(0) => {
-                                Err(io::Error::new(
-                                    io::ErrorKind::WriteZero,
-                                    "connection closed while \
-                                     sending a file"))
-                            }
-                            Ok(bytes_sent) => {
-                                file.offset += bytes_sent as u64;
-                                Ok((file, dest))
-                            }
-                            Err(ref e)
-                            if e.kind() == io::ErrorKind::WouldBlock
-                            => {
-                                Ok((file, dest))
-                            }
-                            Err(e) => Err(e),
+                    match dest.poll_write() {
+                        Async::Ready(()) => {
+                            (WaitSend(self.0.pool.spawn_fn(move || {
+                                loop {
+                                    match dest.write_file(&mut file) {
+                                        Ok(0) => {
+                                            return Err(io::Error::new(
+                                                io::ErrorKind::WriteZero,
+                                                "connection closed while \
+                                                 sending a file"))
+                                        }
+                                        Ok(bytes_sent) => {
+                                            file.offset += bytes_sent as u64;
+                                            if file.offset >= file.size {
+                                                return Ok((file, dest));
+                                            } else {
+                                                continue;
+                                            }
+                                        }
+                                        Err(ref e)
+                                        if e.kind() == io::ErrorKind::WouldBlock
+                                        => {
+                                            return Ok((file, dest))
+                                        }
+                                        Err(e) => return Err(e),
+                                    }
+                                }
+                            })), true)
                         }
-                    }))
+                        Async::NotReady => {
+                            (WaitWrite(file, dest), false)
+                        }
+                    }
                 }
                 Empty => unreachable!(),
+            };
+            self.1 = newstate;
+            if !cont {
+                return Ok(Async::NotReady);
             }
         }
     }
